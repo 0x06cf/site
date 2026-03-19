@@ -1,0 +1,12 @@
+{
+    "name": "UploadRedirect",
+    "description": "Reuploads big files through a boosted server so you get the 100MB limit anywhere",
+    "authors": [
+        {
+            "name": "misticc",
+            "id": "0"
+        }
+    ],
+    "main": "index.js",
+    "hash": ""
+}
