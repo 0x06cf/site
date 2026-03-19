@@ -1,0 +1,14 @@
+{
+    "id": "uploadredirect",
+    "name": "UploadRedirect",
+    "description": "Reuploads big files through a boosted server so you get the 100MB limit anywhere",
+    "authors": [
+        {
+            "name": "0x06cf",
+            "id": "0"
+        }
+    ],
+    "main": "index.js",
+    "version": "1.0.0",
+    "vendetta": {}
+}
