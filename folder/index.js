@@ -1,212 +1,164 @@
-/**
- * UploadRedirect — Kettu/Vendetta mobile plugin
- * Ported from the Vencord plugin by misticc.
- *
- * Reuploads files through a Nitro-boosted (level 3) channel so you get
- * the 100 MB upload limit everywhere.
- *
- * Settings (stored via vendetta storage):
- *   boostChan  — channel ID of your level-3 server channel
- *   sizeLimitMb — minimum file size (MB) to redirect; 0 = always redirect
- */
+(function () {
+    const { metro, storage, ui } = window.vendetta;
+    const { findByProps } = metro;
 
-// ─── Vendetta / Kettu API ────────────────────────────────────────────────────
-const {
-    metro: { findByProps },
-    storage,
-    ui: { toasts },
-} = window.vendetta;
+    const AuthModule = findByProps("getToken");
+    const UploadModule = findByProps("promptToUpload");
 
-// Discord internals
-const AuthModule      = findByProps("getToken");
-const UploadModule    = findByProps("promptToUpload");
+    const KEY_CHAN  = "UploadRedirect_boostChan";
+    const KEY_LIMIT = "UploadRedirect_sizeLimitMb";
 
-// ─── Persistent settings ─────────────────────────────────────────────────────
-// `storage` is a simple key/value store that persists across restarts.
-// We namespace everything under "UploadRedirect".
-const KEY_CHAN  = "UploadRedirect_boostChan";
-const KEY_LIMIT = "UploadRedirect_sizeLimitMb";
-
-function getSetting(key, fallback) {
-    const v = storage.get(key);
-    return v !== undefined && v !== null ? v : fallback;
-}
-
-function setSetting(key, value) {
-    storage.set(key, value);
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-function bigEnough(files) {
-    const mb = getSetting(KEY_LIMIT, 0);
-    if (mb === 0) return true;
-    return files.some(f => f.size > mb * 1024 * 1024);
-}
-
-/** Best-effort channel ID from the current route pathname */
-function currentChanId() {
-    try {
-        return window.location.pathname.match(/\/channels\/(?:\d+|@me)\/(\d+)/)?.[1] ?? null;
-    } catch {
-        return null;
+    function getSetting(key, fallback) {
+        const v = storage.impl.get(key);
+        return (v !== undefined && v !== null) ? v : fallback;
     }
-}
-
-function toast(msg, type) {
-    // type: "success" | "failure" | "message"
-    toasts.open({ content: msg, source: type === "failure" ? "danger" : type });
-}
-
-// ─── Core reupload logic ──────────────────────────────────────────────────────
-async function reupload(files, originalChan) {
-    const destChan = (getSetting(KEY_CHAN, "") ?? "").trim();
-    if (!destChan) {
-        toast("UploadRedirect: set a channel ID first in settings", "failure");
-        return;
+    function setSetting(key, value) {
+        storage.impl.set(key, value);
     }
 
-    toast("UploadRedirect: uploading…", "message");
-
-    const fd = new FormData();
-    files.forEach((f, i) => fd.append(`files[${i}]`, f, f.name));
-    fd.append("payload_json", JSON.stringify({
-        content: "",
-        attachments: files.map((f, i) => ({ id: `${i}`, filename: f.name })),
-    }));
-
-    let resp;
-    try {
-        resp = await fetch(`/api/v9/channels/${destChan}/messages`, {
-            method: "POST",
-            headers: { Authorization: AuthModule.getToken() },
-            body: fd,
-        });
-    } catch (e) {
-        toast("UploadRedirect: network error — " + e.message, "failure");
-        return;
+    function bigEnough(files) {
+        const mb = getSetting(KEY_LIMIT, 0);
+        if (mb === 0) return true;
+        return files.some(function (f) { return f.size > mb * 1024 * 1024; });
     }
 
-    if (!resp.ok) {
-        const body = await resp.json().catch(() => ({ message: resp.statusText }));
-        toast(`UploadRedirect: failed ${resp.status}: ${body.message}`, "failure");
-        return;
-    }
-
-    const json = await resp.json();
-    if (!json.attachments?.length) {
-        toast("UploadRedirect: no attachments returned", "failure");
-        return;
-    }
-
-    // Re-download from CDN so Discord shows the normal attachment preview
-    const redownloaded = await Promise.all(
-        json.attachments.map(async (a, i) => {
-            const blob = await fetch(a.url).then(r => r.blob());
-            return new File([blob], files[i]?.name ?? "file", { type: blob.type });
-        })
-    );
-
-    UploadModule.promptToUpload(redownloaded, { id: originalChan }, 0);
-    toast("UploadRedirect: done!", "success");
-}
-
-// ─── Event listener bookkeeping ───────────────────────────────────────────────
-const _attached = [];
-const _doneInputs = new WeakSet();
-let _mo = null;
-
-function _on(el, ev, fn) {
-    el.addEventListener(ev, fn, true);
-    _attached.push([el, ev, fn]);
-}
-
-function hookInput(el) {
-    if (_doneInputs.has(el)) return;
-    _doneInputs.add(el);
-    _on(el, "change", (e) => {
-        const inp = e.target;
-        const picked = Array.from(inp.files ?? []);
-        if (!picked.length || !bigEnough(picked)) return;
-        e.stopImmediatePropagation();
+    function currentChanId() {
         try {
-            inp.value = "";
-            Object.defineProperty(inp, "files", {
-                get: () => new DataTransfer().files,
-                configurable: true,
+            const m = window.location.pathname.match(/\/channels\/(?:\d+|@me)\/(\d+)/);
+            return m ? m[1] : null;
+        } catch (e) { return null; }
+    }
+
+    function toast(msg, type) {
+        try {
+            ui.toasts.open({ content: msg, source: type === "failure" ? "danger" : type });
+        } catch (e) {
+            console.log("[UploadRedirect] " + msg);
+        }
+    }
+
+    async function reupload(files, originalChan) {
+        const destChan = (getSetting(KEY_CHAN, "") || "").trim();
+        if (!destChan) {
+            toast("UploadRedirect: set a boost channel ID in plugin settings first", "failure");
+            return;
+        }
+
+        toast("UploadRedirect: uploading...", "message");
+
+        const fd = new FormData();
+        files.forEach(function (f, i) { fd.append("files[" + i + "]", f, f.name); });
+        fd.append("payload_json", JSON.stringify({
+            content: "",
+            attachments: files.map(function (f, i) { return { id: "" + i, filename: f.name }; })
+        }));
+
+        let resp;
+        try {
+            resp = await fetch("/api/v9/channels/" + destChan + "/messages", {
+                method: "POST",
+                headers: { Authorization: AuthModule.getToken() },
+                body: fd
             });
-        } catch { /* ignore */ }
-        const ch = currentChanId();
-        if (ch) reupload(picked, ch);
-    });
-}
+        } catch (e) {
+            toast("UploadRedirect: network error — " + e.message, "failure");
+            return;
+        }
 
-// ─── Plugin lifecycle ─────────────────────────────────────────────────────────
-export default {
-    manifest: {
-        name: "UploadRedirect",
-        description: "Reuploads big files through a boosted server so you get 100 MB limit anywhere",
-        authors: [{ name: "misticc", id: "0" }],
-    },
+        if (!resp.ok) {
+            const body = await resp.json().catch(function () { return { message: resp.statusText }; });
+            toast("UploadRedirect: failed " + resp.status + ": " + body.message, "failure");
+            return;
+        }
 
-    /**
-     * Called from the Settings UI (or directly from a future settings sheet).
-     * Kettu/Vendetta doesn't have Vencord's typed settings system, so we
-     * expose get/set helpers that the settings page can call.
-     */
-    settings: {
-        getBoostChan: ()    => getSetting(KEY_CHAN, ""),
-        setBoostChan: (v)   => setSetting(KEY_CHAN, v),
-        getSizeLimitMb: ()  => getSetting(KEY_LIMIT, 0),
-        setSizeLimitMb: (v) => setSetting(KEY_LIMIT, Number(v)),
-    },
+        const json = await resp.json();
+        if (!json.attachments || !json.attachments.length) {
+            toast("UploadRedirect: no attachments returned", "failure");
+            return;
+        }
 
-    onLoad() {
-        const root = document.getElementById("app-mount") ?? document.body;
+        const redownloaded = await Promise.all(json.attachments.map(async function (a, i) {
+            const blob = await fetch(a.url).then(function (r) { return r.blob(); });
+            return new File([blob], (files[i] && files[i].name) || "file", { type: blob.type });
+        }));
 
-        // Drag-and-drop
-        _on(root, "drop", (e) => {
-            const files = Array.from(e.dataTransfer?.files ?? []);
-            if (!files.length || !bigEnough(files)) return;
-            e.preventDefault();
+        UploadModule.promptToUpload(redownloaded, { id: originalChan }, 0);
+        toast("UploadRedirect: done!", "success");
+    }
+
+    const _attached = [];
+    const _doneInputs = new WeakSet();
+    let _mo = null;
+
+    function _on(el, ev, fn) {
+        el.addEventListener(ev, fn, true);
+        _attached.push([el, ev, fn]);
+    }
+
+    function hookInput(el) {
+        if (_doneInputs.has(el)) return;
+        _doneInputs.add(el);
+        _on(el, "change", function (e) {
+            const inp = e.target;
+            const picked = Array.from(inp.files || []);
+            if (!picked.length || !bigEnough(picked)) return;
             e.stopImmediatePropagation();
+            try {
+                inp.value = "";
+                Object.defineProperty(inp, "files", {
+                    get: function () { return new DataTransfer().files; },
+                    configurable: true
+                });
+            } catch (e) {}
             const ch = currentChanId();
-            if (ch) reupload(files, ch);
+            if (ch) reupload(picked, ch);
         });
+    }
 
-        // Paste
-        _on(root, "paste", (e) => {
-            const files = Array.from(e.clipboardData?.files ?? []);
-            if (!files.length || !bigEnough(files)) return;
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            const ch = currentChanId();
-            if (ch) reupload(files, ch);
-        });
+    return {
+        onLoad: function () {
+            const root = document.getElementById("app-mount") || document.body;
 
-        // File-picker inputs already in the DOM
-        document
-            .querySelectorAll('input[type="file"]')
-            .forEach(el => hookInput(el));
+            _on(root, "drop", function (e) {
+                const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+                if (!files.length || !bigEnough(files)) return;
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                const ch = currentChanId();
+                if (ch) reupload(files, ch);
+            });
 
-        // Watch for new file inputs added dynamically
-        _mo = new MutationObserver(muts => {
-            for (const m of muts) {
-                for (const n of m.addedNodes) {
-                    if (n instanceof HTMLInputElement && n.type === "file") {
-                        hookInput(n);
-                    } else if (n instanceof HTMLElement) {
-                        n.querySelectorAll('input[type="file"]').forEach(el => hookInput(el));
-                    }
-                }
-            }
-        });
-        _mo.observe(document.body, { childList: true, subtree: true });
-    },
+            _on(root, "paste", function (e) {
+                const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+                if (!files.length || !bigEnough(files)) return;
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                const ch = currentChanId();
+                if (ch) reupload(files, ch);
+            });
 
-    onUnload() {
-        _attached.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn, true));
-        _attached.length = 0;
-        _mo?.disconnect();
-        _mo = null;
-    },
-};
+            document.querySelectorAll('input[type="file"]').forEach(function (el) { hookInput(el); });
+
+            _mo = new MutationObserver(function (muts) {
+                muts.forEach(function (m) {
+                    m.addedNodes.forEach(function (n) {
+                        if (n instanceof HTMLInputElement && n.type === "file") {
+                            hookInput(n);
+                        } else if (n instanceof HTMLElement) {
+                            n.querySelectorAll('input[type="file"]').forEach(function (el) { hookInput(el); });
+                        }
+                    });
+                });
+            });
+            _mo.observe(document.body, { childList: true, subtree: true });
+        },
+
+        onUnload: function () {
+            _attached.forEach(function (entry) {
+                entry[0].removeEventListener(entry[1], entry[2], true);
+            });
+            _attached.length = 0;
+            if (_mo) { _mo.disconnect(); _mo = null; }
+        }
+    };
+})();
